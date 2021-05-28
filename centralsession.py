@@ -15,6 +15,7 @@ import json
 import urllib
 import urllib.parse as urlparse
 from datetime import datetime
+from time import sleep
 import pandas as pd
 from bs4 import BeautifulSoup
 import traceback
@@ -81,13 +82,6 @@ def root_cause(e):
     return rc
 
 
-def sethdr(args, hdr, cont):
-    if 'headers' in args:
-        args['headers'][hdr] = cont
-    else:
-        args['headers'] = {hdr: cont}
-
-
 ########################
 #   Main class
 ########################
@@ -112,6 +106,11 @@ class CentralSession:
         self.apiLogin = False
         self.tokenCacheFile = 'tokens.txt'
 
+        if self.central_nms_login():
+            log.info("Central NMS UI login successful.")
+        else:
+            log.err("Central login failed. Abort.")
+            sys.exit(-1)
 
     def getPortalHost(self):
         return portalDomainList[self.instname]
@@ -125,32 +124,65 @@ class CentralSession:
     def getApigwUrl(self, path=""):
         return "https://" + apigwDomainList[self.instname] + path
 
-    def apises_update(self):
+    def _apises_update(self):
         self.apiSes.headers.update({"Authorization": f"Bearer {self.accToken}"})
 
 
     ########################
-    #   HTTP I/F
+    #   API I/F
     ########################
-    def get_request(self, url, *args, **kwargs):
-        return self.get_request_ses(self.uiSes, url, *args, **kwargs)
+    def apiReq(self, method, endpoint, *args, **kwargs):
+        if self.accToken == '':
+            if not self._get_api_token():
+                return False
+        if not endpoint.startswith("/"):
+            endpoint = "/" + endpoint
+        url = "https://" + apigwDomainList[self.instname] + endpoint
+        return self._request_ses(self.apiSes, method, url, *args, **kwargs)
 
-    def post_request(self, url, *args, **kwargs):
-        return self.post_request_ses(self.uiSes, url, *args, **kwargs)
+    def apiGet(self, endpoint, *args, **kwargs):
+        if self.accToken == '':
+            if not self._get_api_token():
+                return False
+        if not endpoint.startswith("/"):
+            endpoint = "/" + endpoint
+        url = "https://" + apigwDomainList[self.instname] + endpoint
+        return self._request_ses(self.apiSes, "GET", url, *args, **kwargs)
 
-    def get_request_api(self, url, *args, **kwargs):
-        return self.get_request_ses(self.apiSes, url, *args, **kwargs)
+    def apiPost(self, endpoint, *args, **kwargs):
+        if self.accToken == '':
+            if not self._get_api_token():
+                return False
+        if not endpoint.startswith("/"):
+            endpoint = "/" + endpoint
+        url = "https://" + apigwDomainList[self.instname] + endpoint
+        return self._request_ses(self.apiSes, "POST", url, *args, **kwargs)
 
-    def post_request_api(self, url, *args, **kwargs):
-        return self.post_request_ses(self.apiSes, url, *args, **kwargs)
+    def nmsGet(self, endpoint, *args, **kwargs):
+        if not endpoint.startswith("/"):
+            endpoint = "/" + endpoint
+        url = "https://" + uiDomainList[self.instname] + endpoint
+        return self._request_ses(self.uiSes, "GET", url, *args, **kwargs)
+
+    def nmsPost(self, endpoint, *args, **kwargs):
+        if not endpoint.startswith("/"):
+            endpoint = "/" + endpoint
+        url = "https://" + uiDomainList[self.instname] + endpoint
+        return self._request_ses(self.uiSes, "POST", url, *args, **kwargs)
 
     #
-    #   get/post wrapper
+    #   request wrapper
     #
-    def get_request_ses(self, ses, url, *args, **kwargs):
-        log.debug(f"\tGET {url}")
+    def _get_request(self, url, *args, **kwargs):
+        return self._request_ses(self.uiSes, "GET", url, *args, **kwargs)
+
+    def _post_request(self, url, *args, **kwargs):
+        return self._request_ses(self.uiSes, "POST", url, *args, **kwargs)
+
+    def _request_ses(self, ses, method, url, *args, **kwargs):
+        log.debug(f"\t{method} {url}")
         try:
-            resp = ses.get(url=url, *args, **kwargs)
+            resp = ses.request(method=method, url=url, *args, **kwargs)
         except requests.exceptions.ConnectionError as e:
             log.err(f"HTTP connection error - {str(root_cause(e))}")
             exit()
@@ -164,29 +196,594 @@ class CentralSession:
             log.debug(f"response='{resp.content}'")
         return resp
 
+    ################################################################
+    #   pycentral I/F
+    ################################################################
+    def command(self, apiMethod, apiPath, apiData={}, apiParams={},
+                headers={}, files={}, retry_api_call=True):
+        if self.accToken == '':
+            if not self._get_api_token():
+                return False
+        retry = 0
+        result = ''
+        method = apiMethod
+        while retry <= 1:
+            if not retry_api_call:
+                retry = 100
+            url = self.getApigwUrl(apiPath)
+            if not headers and not files:
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                }
+            if apiData and headers['Content-Type'] == "application/json":
+                apiData = json.dumps(apiData)
 
-    def post_request_ses(self, ses, url, *args, **kwargs):
-        log.debug(f"\tPOST {url}")
+            log.debug(f"\t{method} {url}")
+            resp = self.apiSes.request(url=url, data=apiData, method=method,
+                                   headers=headers, params=apiParams, files=files)
+            log.debug(f"\tStatus: {resp.status_code} {resp.reason} ({len(resp.content)} bytes)")
+
+            if resp.status_code == 401 and "invalid_token" in resp.text and retry_api_call:
+                log.warn("Received error 401 on requesting url "
+                                  "%s with resp %s" % (str(url), str(resp.text)))
+                if retry < 1:
+                    self._refresh_token()
+                retry += 1
+            else:
+                result = {
+                    "code": resp.status_code,
+                    "msg": resp.text,
+                    "headers": dict(resp.headers)
+                }
+                try:
+                    result["msg"] = json.loads(result["msg"])
+                except:
+                    pass
+                return result
+
+        return False    # retry over
+
+    ###############################################################
+    #   HPE SSO
+    ###############################################################
+    def hpe_sso(self):
+
+        if self.username == '':
+            log.err("hpe_sso: username is empty.")
+            return False
+        if self.password == '':
+            log.err("hpe_sso: password is empty.")
+            return False
+
+    ###############################################################
+    #   HPESSO Pass 1
+    ###############################################################
+        print("[HPESSO] Pass 1 - Initiate HPE SSO")
+        tgt_central = self.getPortalUrl("/platform/login/user")
+        tgt_res = "https://sso.arubanetworks.com/idp/startSSO.ping?PartnerSpId=PRD:Athena:SP&TargetResource=" + \
+                  urllib.parse.quote(tgt_central, safe='')
+        url = "https://sso.arubanetworks.com/sp/startSSO.ping?PartnerIdpId=login.ext.hpe.com&TargetResource=" + \
+              urllib.parse.quote(tgt_res, safe='')
+
+        resp1 = self._get_request(url)
+
+        soup = BeautifulSoup(resp1.content, features="html.parser")
         try:
-            resp = ses.post(url=url, *args, **kwargs)
-        except requests.exceptions.ConnectionError as e:
-            log.err(f"HTTP connection error - {str(root_cause(e))}")
-            exit()
-        except Exception as e:
-            traceback.print_exc()
-            log.err(f"got error:{str(e)} abort.")
-            exit()
+            saml_code = soup.find('input', {'name': 'SAMLRequest'}).get('value')
+            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
+            url = soup.find('form').get('action')
+            log.debug(f"\tGot Action URL={url}")
+        except:
+            log.err(f"Invalid SAML message.")
+            return False
 
-        log.debug(f"\tStatus: {resp.status_code} {resp.reason} ({len(resp.content)} bytes)")
+    ###############################################################
+    #   HPESSO Pass 2
+    ###############################################################
+        print("[HPESSO] Pass 2 - POST SAML Request 1/2")
+        resp2 = self._post_request(
+            url=url,
+            data={
+                "SAMLRequest": saml_code,
+                "RelayState": relaystate,
+            }
+        )
+
+        soup = BeautifulSoup(resp2.content, features="html.parser")
+        try:
+            saml_code = soup.find('input', {'name': 'SAMLRequest'}).get('value')
+            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
+            url = soup.find('form').get('action')
+            log.debug(f"\tGot Action URL={url}")
+        except:
+            log.err(f"Invalid SAML message.")
+            return False
+
+    ###############################################################
+    #   HPESSO Pass 3
+    ###############################################################
+        print("[HPESSO] Pass 3 - POST SAML Request 2/2")
+        resp3 = self._post_request(
+            url=url,
+            data={
+                "SAMLRequest": saml_code,
+                "RelayState": relaystate,
+            }
+        )
+
+        soup = BeautifulSoup(resp3.content, features="html.parser")
+        try:
+            url = soup.find('form').get('action')
+            log.debug(f"\tGot Action URL={url}")
+        except:
+            log.err(f"Invalid SAML message.")
+            return False
+
+        if not url.startswith("http"):
+            url = "https://" + urllib.parse.urlparse(resp3.url).netloc + url
+
+    ###############################################################
+    #   HPESSO Pass 4
+    ###############################################################
+        print("[HPESSO] Pass 4 - Post Credential")
+        resp4 = self._post_request(
+            url=url,
+            data={
+                "pf.username": self.username,
+                "pf.pass": self.password,
+            }
+        )
+        soup = BeautifulSoup(resp4.content, features="html.parser")
+        try:
+            saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
+            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
+            url = soup.find('form').get('action')
+            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
+        except:
+            log.err("SAML Response is invalid.")
+            return False
+
+    ###############################################################
+    #   HPESSO Pass 5
+    ###############################################################
+        print("[HPESSO] Pass 5 - Post SAML Response 1/3")
+        resp5 = self._post_request(
+            url=url,
+            data={
+                "SAMLResponse": saml_code,
+                "RelayState": relaystate,
+            }
+        )
+        soup = BeautifulSoup(resp5.content, features="html.parser")
+        try:
+            saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
+            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
+            url = soup.find('form').get('action')
+            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
+        except:
+            log.err("SAML Response is invalid.")
+            return False
+
+    ###############################################################
+    #   HPESSO Pass 6
+    ###############################################################
+        print("[HPESSO] Pass 6 - Post SAML Response 2/3")
+        resp6 = self._post_request(
+            url=url,
+            data={
+                "SAMLResponse": saml_code,
+                "RelayState": relaystate,
+            }
+        )
+        soup = BeautifulSoup(resp6.content, features="html.parser")
+        try:
+            saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
+            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
+            url = soup.find('form', {'method': 'post'}).get('action')
+            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
+        except:
+            log.err("SAML Response is invalid.")
+            return False
+
+    ###############################################################
+    #   HPESSO Pass 7
+    ###############################################################
+        print("[HPESSO] Pass 7 - Post SAML Response 3/3")
+        resp7 = self._post_request(
+            url=url,
+            data={
+                "SAMLResponse": saml_code,
+                "RelayState": relaystate,
+            }
+        )
+        soup = BeautifulSoup(resp7.content, features="html.parser")
+        try:
+            ref_code = soup.find('input', {'name': 'REF'}).get('value')
+            log.debug(f"\tGot SAML REF Code... {ref_code}")
+        except:
+            log.err("SAML REF Code not found.")
+            return False
+
+        return ref_code
+
+
+    def aruba_sso(self):
+
+        if self.username == '':
+            log.err("aruba_sso: Please specify username.")
+            return False
+        if self.password == '':
+            log.err("aruba_sso: Please specify password.")
+            return False
+
+    ###############################################################
+    #   [SSO] Pass 1
+    ###############################################################
+        print("[SSO] Pass 1 - Initiate SSO redirect")
+        url = self.getPortalUrl("/platform/login/aruba/sso")
+        resp1 = self._post_request(
+            url=url,
+            params={
+                "username": self.username,
+            },
+            data={
+                "pf.username": self.username,
+            },
+        )
+
+        log.debug(f"\tGot Idp URL... {resp1.url}")
+
+    ###############################################################
+    #   [SSO] Pass 2
+    ###############################################################
+        print("[SSO] Pass 2 - Post Credentials to Idp")
+        url = resp1.url
+        resp2 = self._post_request(
+            url=url,
+            data={
+                "pf.username": self.username,
+                "pf.pass": self.password,
+            }
+        )
+        soup = BeautifulSoup(resp2.content, features="html.parser")
+        try:
+            saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
+            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
+            url = soup.find('form').get('action')
+            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
+        except:
+            log.err("SAML Response is invalid.")
+            return False
+
+    ###############################################################
+    #   [SSO] Pass 3
+    ###############################################################
+        print("[SSO] Pass 3 - Post SAML code to SSO ACS")
+        resp3 = self._post_request(
+            url=url,
+            data={
+                "RelayState": relaystate,
+                "SAMLResponse": saml_code,
+            }
+        )
+        soup = BeautifulSoup(resp3.content, features="html.parser")
+        try:
+            ref_code = soup.find('input', {'name': 'REF'}).get('value')
+            log.debug(f"\tGot SAML REF Code... {ref_code}")
+        except:
+            log.err("SAML REF Code not found.")
+            return False
+
+        return ref_code
+
+
+    ###############################################################
+    #   Login to Central Frontend
+    ###############################################################
+    def central_nms_login(self):
+
+        if self.username is None or self.username == '':
+            log.err("Username is not specified.")
+            return False
+
+        if self.password is None or self.password == '':
+            self.password = getpass.getpass("Password: ")
+
+        if '@hpe.com' in self.username:
+            ref_code = self.hpe_sso()
+        else:
+            ref_code = self.aruba_sso()
+
+        if not ref_code:
+            log.err("Login failed.")
+            return False
+
+    ###############################################################
+    #   [Central] Pass 1
+    ###############################################################
+        print("[Central] Pass 1 - Post SAML REF to Aruba Central")
+        url = self.getPortalUrl("/platform/login/user")
+        resp1 = self._post_request(
+            url=url,
+            data={
+                "REF": ref_code,
+                "TargetResource": url,
+            },
+        )
+
+    ###############################################################
+    #   Customer selection
+    ###############################################################
+        if self.customerId is None or self.customerId == '':
+            self.customerId = self._get_customerid()
+
+    ###############################################################
+    #   [Central] Pass 2
+    ###############################################################
+        print(f"[Central] Pass 2 - Select user account (CID: {self.customerId})")
+        url = self.getPortalUrl("/platform/login/customers/selection")
+        resp2 = self._post_request(
+            url=url,
+            headers={
+                "Content-type": "application/json;charset=utf-8",
+                "Host": self.getPortalHost()
+            },
+            json={
+                "cid": self.customerId
+            }
+        )
+
+    ###############################################################
+    #   [Central] Pass 3
+    ###############################################################
+        print("[Central] Pass 3 - Launch NMS")
+        url = self.getPortalUrl("/platform/login/apps/nms/launch")
+        resp3 = self. _get_request(url)
+
+        self.nmsLogin = True
+        return True
+
+
+    ###############################################################
+    #   OAuth Login to API
+    ###############################################################
+    def central_api_login(self):
+
+        if self.username is None or self.username == '':
+            log.err("Username is not specified.")
+            return False
+
+        if '@hpe.com' in self.username or '@arubanetworks.com' in self.username:
+            print("username with domain @hpe.com or @arubanetworks.com is not supported.")
+            return False
+
+        if self.password is None or self.password == '':
+            self.password = getpass.getpass("Password: ")
+
+        if self.clientId == '' or self.clientSecret == '':
+            if not self.nmsLogin:
+                self.central_nms_login()
+            self._get_client_creds()
+
+    ###############################################################
+    #   [API] Pass 1 - Login
+    ###############################################################
+        print("[API] Pass 1 - Login")
+        resp1 = self.apiPost(
+            endpoint = "/oauth2/authorize/central/api/login",
+            params = { "client_id": self.clientId },
+            headers={
+                'Content-Type': 'application/json',
+            },
+            json={
+                "username": self.username,
+                "password": self.password,
+            },
+        )
+
+        if resp1.status_code != 200:
+            log.err(f"Got error {resp1.status_code}. abort.")
+            return False
+
+        log.debug(f"Get Response: {resp1.content}")
+
+    ###############################################################
+    #   [API] Pass 2 - Generate Authorization Code
+    ###############################################################
+        print("[API] Pass 2 - Get Authorization code")
+        resp2 = self.apiPost(
+            endpoint = "/oauth2/authorize/central/api",
+            params = {
+                "client_id": self.clientId,
+                "response_type": "code",
+                "scope": "all",
+            },
+            headers={
+                'Content-Type': 'application/json',
+                #'X-CSRF-Token': 'xxxx',
+            },
+            json={
+                'customer_id': self.customerId
+            }
+        )
+
+        if resp2.status_code != 200:
+            log.err(f"Got error {resp2.status_code}. abort.")
+            return False
+
+        log.debug(f"Get Response: {resp2.content}")
+        auth_code = json.loads(resp2.content)["auth_code"]
+        log.debug(f"API auth successful. Auth code={auth_code}")
+
+    ###############################################################
+    #   [API] Pass 3 - Get Token
+    ###############################################################
+        print("[API] Pass 3 - Get Access token")
+        resp3 = self.apiPost(
+            endpoint = "/oauth2/token",
+            params = {
+                "client_id": self.clientId,
+                "client_secret": self.clientSecret,
+                "grant_type": "authorization_code",
+                "code": auth_code,
+            },
+            headers={
+                'Content-Type': 'application/json',
+                #'X-CSRF-Token': 'xxxx',
+            },
+        )
+
+        if resp3.status_code != 200:
+            log.err(f"Got error {resp3.status_code}. abort.")
+            return False
+
+        log.debug(f"Get Response: {resp3.content}")
+        j = json.loads(resp3.content)
+        self.accToken = j['access_token']
+        self.refToken = j['refresh_token']
+        self._apises_update()
+        log.debug(f"Got Tokens. acc={self.accToken}, ref={self.refToken}")
+
+        return True
+
+
+    ################################################################
+    #   Generate New Access Token via Central UI
+    ################################################################
+    def _generate_acc_token(self):
+        log.debug("generate_acc_token: Generating new token...")
+        url = self.getPortalUrl("/user_apigw/apps/nms/oauth/credentials")
+        csrftoken = self.uiSes.cookies.get("csrftoken", domain=self.getPortalHost())
+        resp = self._post_request(
+            url=url,
+            json={
+                "client_display_name": self.appName,
+                "self.appName": "nms",
+                "redirect_uri": "",
+            },
+            headers={
+                "referer": self.getPortalUrl("/platform/frontend/"),  # Mandatory
+                "x-requested-with": "XMLHttpRequest",   # Mandatory
+                "x-csrf-token": csrftoken   # Mandatory
+            }
+        )
+
         if resp.status_code != 200:
-            log.debug(f"response='{resp.content}'")
-        return resp
+            log.err(f"generate_acc_token: Got error {resp.status_code}.")
+            return False
 
+        log.debug(f"generate_acc_token: Get Response: {resp.content}")
+        j = json.loads(resp.content)
+        self.accToken = j['access_token']
+        self.refToken = j['refresh_token']
+        self._apises_update()
+        self._save_tokens()
+
+        log.info(f"generate_acc_token: Tokens generated for app '{self.appName}', AccToken='{self.accToken}', RefToken='{self.refToken}'")
+        return True
+
+
+    ################################################################
+    #   Refresh access token
+    ################################################################
+    def _refresh_token(self):
+        assert(self.appName != "")
+        if self.clientId == '' or self.clientSecret == '':
+            if not self._get_client_creds():      # get self.clientId and self.clientSecret
+                log.info(f"refresh_token: appname '{self.appName}' not found in UI. adding it...")
+                if not self._generate_acc_token():
+                    log.err(f"Token generation failed. Abort.")
+                    sys.exit(-1)
+                # token newly generated, no need to refresh
+                sleep(1)
+                return True
+
+        resp = self.apiPost(
+            endpoint = "/oauth2/token",
+            params = {
+                "client_id": self.clientId,
+                "client_secret": self.clientSecret,
+                "grant_type": "refresh_token",
+                "refresh_token": self.refToken,
+            }
+        )
+        if resp.status_code != 200:
+            log.debug(f"refresh_token: Refresh failed. body='{resp.content}'")
+            return False
+
+        log.debug(f"refresh_token: Refresh successful! body='{resp.content}'")
+        j = json.loads(resp.content)
+        self.accToken = j['access_token']
+        self.refToken = j['refresh_token']
+        self._apises_update()
+        self._save_tokens()
+
+        log.info(f"refresh_token: Token refreshed. AccToken={self.accToken}, RefToken={self.refToken}")
+        return True
+
+    ################################################################
+    #   Check if Acccess Token is valid
+    #   If it's not, try to refresh it
+    #   If it fails, try to generate new one
+    ################################################################
+    def _check_and_refresh(self):
+        resp = self.apiGet(
+            endpoint = "/configuration/v2/groups",
+            params = {
+                "limit": 10,
+                "offset": 0,
+            })
+        if resp.status_code == 200:
+            log.debug("check_and_refresh: Access Token is valid.")
+            return True
+
+        log.debug(f"check_and_refresh: got response {resp.status_code}")
+
+        if resp.status_code != 401:
+            return False            # unknown error response
+
+        j = json.loads(resp.content)
+        if j['error'] == 'invalid_token':
+            log.debug("check_and_refresh: Got invalid_token error. refreshing tokens...")
+            if self._refresh_token():
+                log.debug("check_and_refresh: token refresh successful. retrying API access ...")
+                resp2 = self.apiGet(
+                    endpoint="/configuration/v2/groups",
+                    params={
+                        "limit": 10,
+                        "offset": 0,
+                    })
+                if resp2.status_code == 200:
+                    log.debug("check_and_refresh: API Token is valid.")
+                    return True
+                else:
+                    log.debug(f"check_and_refresh: API access failed. response='{resp2.content}'")
+                    return False
+            else:   # token refresh failed
+                return self._generate_acc_token()
+
+        log.err(f"check_and_refresh: Got error: {j['error']}")
+        return False
+
+    ################################################################
+    #   get valid Access Token
+    ################################################################
+    def _get_api_token(self):
+        if not self._restore_tokens():
+            print("Cached token not found. retrieveing new token...")
+            if self.appName is None or self.appName == '':
+                if not self._get_client_creds():  # select appName from application list in Central UI
+                    self.appName = input("Enter App name: ")
+            if not self._generate_acc_token():
+                return False
+
+        return self._check_and_refresh()
 
     ########################
     #   Token storage
     ########################
-    def restore_tokens(self):
+    def _restore_tokens(self):
         """
         token.txt から username, customerId, appName がマッチする行を検索し、accToken, refToken を読み込む。
         ただし appName が指定されていない場合、username, customerId がマッチする最新のエントリから appName を取得する。
@@ -214,25 +811,25 @@ class CentralSession:
                     self.appName  = d[2]
                     self.accToken = d[3]
                     self.refToken = d[4]
-                    self.apises_update()
+                    self._apises_update()
                     log.debug(f"restore_tokens: Found matching tokens in cache for app '{self.appName}', AccToken='{self.accToken}', RefToken='{self.refToken}'")
                     return True
             else:
                 if d[0] == self.username and d[1] == self.customerId and d[2] == self.appName:
                     self.accToken = d[3]
                     self.refToken = d[4]
-                    self.apises_update()
+                    self._apises_update()
                     log.debug(f"restore_tokens: Found matching tokens in cache for app '{self.appName}', AccToken='{self.accToken}', RefToken='{self.refToken}'")
                     return True
 
         log.debug("restore_token: No matching token found in cache")
         return False
 
-    def save_tokens(self):
+    def _save_tokens(self):
         """
         tokens.txt を username, customerId, appName で検索し、現在の accToken, refToken に書き換える。
         ファイルがない場合は新規作成。
-        :return: 
+        :return:
         """
         try:
             with open(self.tokenCacheFile, mode="r") as f:
@@ -260,13 +857,13 @@ class CentralSession:
     ########################
     #   Select customer
     ########################
-    def get_customerid(self):
+    def _get_customerid(self):
         '''
         Print list of customers and let user select one
         '''
 
         url = self.getPortalUrl("/platform/login/customers")
-        resp = self.get_request(url)
+        resp = self._get_request(url)
         j = json.loads(resp.content)
         clist = j['customers_list']
         assert(len(clist)>=1)
@@ -300,13 +897,13 @@ class CentralSession:
     #   if appName is empty, let user select one
     #   if appName is not empty, search the matching name from the list
     ###############################################################
-    def get_client_creds(self):
+    def _get_client_creds(self):
         """
         API client ID/secret を取得
-        :return: 
+        :return:
         """
         url = self.getPortalUrl("/user_apigw/oauth/credentials?all_apps=true")
-        resp = self.get_request(url)
+        resp = self._get_request(url)
         j = json.loads(resp.content)['data']
 
         if self.appName is None or self.appName == '':
@@ -354,516 +951,9 @@ class CentralSession:
         log.info(f"get_client_creds: Client credentials not found for application {self.appName}")
         return False
 
-
-    ###############################################################
-    #   HPE SSO
-    ###############################################################
-    def hpe_sso(self):
-
-        if self.username == '':
-            log.err("hpe_sso: username is empty.")
-            return False
-        if self.password == '':
-            log.err("hpe_sso: password is empty.")
-            return False
-
-    ###############################################################
-    #   HPESSO Pass 1
-    ###############################################################
-        print("[HPESSO] Pass 1 - Initiate HPE SSO")
-        tgt_central = self.getPortalUrl("/platform/login/user")
-        tgt_res = "https://sso.arubanetworks.com/idp/startSSO.ping?PartnerSpId=PRD:Athena:SP&TargetResource=" + \
-                  urllib.parse.quote(tgt_central, safe='')
-        url = "https://sso.arubanetworks.com/sp/startSSO.ping?PartnerIdpId=login.ext.hpe.com&TargetResource=" + \
-              urllib.parse.quote(tgt_res, safe='')
-
-        resp1 = self.get_request(url)
-
-        soup = BeautifulSoup(resp1.content, features="html.parser")
-        try:
-            saml_code = soup.find('input', {'name': 'SAMLRequest'}).get('value')
-            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
-            url = soup.find('form').get('action')
-            log.debug(f"\tGot Action URL={url}")
-        except:
-            log.err(f"Invalid SAML message.")
-            return False
-
-    ###############################################################
-    #   HPESSO Pass 2
-    ###############################################################
-        print("[HPESSO] Pass 2 - POST SAML Request 1/2")
-        resp2 = self.post_request(
-            url=url,
-            data={
-                "SAMLRequest": saml_code,
-                "RelayState": relaystate,
-            }
-        )
-
-        soup = BeautifulSoup(resp2.content, features="html.parser")
-        try:
-            saml_code = soup.find('input', {'name': 'SAMLRequest'}).get('value')
-            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
-            url = soup.find('form').get('action')
-            log.debug(f"\tGot Action URL={url}")
-        except:
-            log.err(f"Invalid SAML message.")
-            return False
-
-    ###############################################################
-    #   HPESSO Pass 3
-    ###############################################################
-        print("[HPESSO] Pass 3 - POST SAML Request 2/2")
-        resp3 = self.post_request(
-            url=url,
-            data={
-                "SAMLRequest": saml_code,
-                "RelayState": relaystate,
-            }
-        )
-
-        soup = BeautifulSoup(resp3.content, features="html.parser")
-        try:
-            url = soup.find('form').get('action')
-            log.debug(f"\tGot Action URL={url}")
-        except:
-            log.err(f"Invalid SAML message.")
-            return False
-
-        if not url.startswith("http"):
-            url = "https://" + urllib.parse.urlparse(resp3.url).netloc + url
-
-    ###############################################################
-    #   HPESSO Pass 4
-    ###############################################################
-        print("[HPESSO] Pass 4 - Post Credential")
-        resp4 = self.post_request(
-            url=url,
-            data={
-                "pf.username": self.username,
-                "pf.pass": self.password,
-            }
-        )
-        soup = BeautifulSoup(resp4.content, features="html.parser")
-        try:
-            saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
-            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
-            url = soup.find('form').get('action')
-            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
-        except:
-            log.err("SAML Response is invalid.")
-            return False
-
-    ###############################################################
-    #   HPESSO Pass 5
-    ###############################################################
-        print("[HPESSO] Pass 5 - Post SAML Response 1/3")
-        resp5 = self.post_request(
-            url=url,
-            data={
-                "SAMLResponse": saml_code,
-                "RelayState": relaystate,
-            }
-        )
-        soup = BeautifulSoup(resp5.content, features="html.parser")
-        try:
-            saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
-            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
-            url = soup.find('form').get('action')
-            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
-        except:
-            log.err("SAML Response is invalid.")
-            return False
-
-    ###############################################################
-    #   HPESSO Pass 6
-    ###############################################################
-        print("[HPESSO] Pass 6 - Post SAML Response 2/3")
-        resp6 = self.post_request(
-            url=url,
-            data={
-                "SAMLResponse": saml_code,
-                "RelayState": relaystate,
-            }
-        )
-        soup = BeautifulSoup(resp6.content, features="html.parser")
-        try:
-            saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
-            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
-            url = soup.find('form', {'method': 'post'}).get('action')
-            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
-        except:
-            log.err("SAML Response is invalid.")
-            return False
-
-    ###############################################################
-    #   HPESSO Pass 7
-    ###############################################################
-        print("[HPESSO] Pass 7 - Post SAML Response 3/3")
-        resp7 = self.post_request(
-            url=url,
-            data={
-                "SAMLResponse": saml_code,
-                "RelayState": relaystate,
-            }
-        )
-        soup = BeautifulSoup(resp7.content, features="html.parser")
-        try:
-            ref_code = soup.find('input', {'name': 'REF'}).get('value')
-            log.debug(f"\tGot SAML REF Code... {ref_code}")
-        except:
-            log.err("SAML REF Code not found.")
-            return False
-
-        return ref_code
-
-
-    def aruba_sso(self):
-
-        if self.username == '':
-            log.err("aruba_sso: Please specify username.")
-            return False
-        if self.password == '':
-            log.err("aruba_sso: Please specify password.")
-            return False
-
-    ###############################################################
-    #   [SSO] Pass 1
-    ###############################################################
-        print("[SSO] Pass 1 - Initiate SSO redirect")
-        url = self.getPortalUrl("/platform/login/aruba/sso")
-        resp1 = self.post_request(
-            url=url,
-            params={
-                "username": self.username,
-            },
-            data={
-                "pf.username": self.username,
-            },
-        )
-
-        log.debug(f"\tGot Idp URL... {resp1.url}")
-
-    ###############################################################
-    #   [SSO] Pass 2
-    ###############################################################
-        print("[SSO] Pass 2 - Post Credentials to Idp")
-        url = resp1.url
-        resp2 = self.post_request(
-            url=url,
-            data={
-                "pf.username": self.username,
-                "pf.pass": self.password,
-            }
-        )
-        soup = BeautifulSoup(resp2.content, features="html.parser")
-        try:
-            saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
-            relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
-            url = soup.find('form').get('action')
-            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
-        except:
-            log.err("SAML Response is invalid.")
-            return False
-
-    ###############################################################
-    #   [SSO] Pass 3
-    ###############################################################
-        print("[SSO] Pass 3 - Post SAML code to SSO ACS")
-        resp3 = self.post_request(
-            url=url,
-            data={
-                "RelayState": relaystate,
-                "SAMLResponse": saml_code,
-            }
-        )
-        soup = BeautifulSoup(resp3.content, features="html.parser")
-        try:
-            ref_code = soup.find('input', {'name': 'REF'}).get('value')
-            log.debug(f"\tGot SAML REF Code... {ref_code}")
-        except:
-            log.err("SAML REF Code not found.")
-            return False
-
-        return ref_code
-
-
-    ###############################################################
-    #   Login to Central Frontend
-    ###############################################################
-    def central_nms_login(self):
-
-        if self.username is None or self.username == '':
-            log.err("Username is not specified.")
-            return False
-
-        if self.password is None or self.password == '':
-            self.password = getpass.getpass("Password: ")
-
-        if '@hpe.com' in self.username:
-            ref_code = self.hpe_sso()
-        else:
-            ref_code = self.aruba_sso()
-
-        if not ref_code:
-            log.err("Login failed.")
-            return False
-
-    ###############################################################
-    #   [Central] Pass 1
-    ###############################################################
-        print("[Central] Pass 1 - Post SAML REF to Aruba Central")
-        url = self.getPortalUrl("/platform/login/user")
-        resp1 = self.post_request(
-            url=url,
-            data={
-                "REF": ref_code,
-                "TargetResource": url,
-            },
-        )
-
-    ###############################################################
-    #   Customer selection
-    ###############################################################
-        if self.customerId is None or self.customerId == '':
-            self.customerId = self.get_customerid()
-
-    ###############################################################
-    #   [Central] Pass 2
-    ###############################################################
-        print(f"[Central] Pass 2 - Select user account (CID: {self.customerId})")
-        url = self.getPortalUrl("/platform/login/customers/selection")
-        resp2 = self.post_request(
-            url=url,
-            headers={
-                "Content-type": "application/json;charset=utf-8",
-                "Host": self.getPortalHost()
-            },
-            json={
-                "cid": self.customerId
-            }
-        )
-
-    ###############################################################
-    #   [Central] Pass 3
-    ###############################################################
-        print("[Central] Pass 3 - Launch NMS")
-        url = self.getPortalUrl("/platform/login/apps/nms/launch")
-        resp3 = self. get_request(url)
-
-        self.nmsLogin = True
-        return True
-
-
-    ###############################################################
-    #   OAuth Login to API
-    ###############################################################
-    def central_api_login(self):
-
-        if self.username is None or self.username == '':
-            log.err("Username is not specified.")
-            return False
-
-        if '@hpe.com' in self.username or '@arubanetworks.com' in self.username:
-            print("username with domain @hpe.com or @arubanetworks.com is not supported.")
-            return False
-
-        if self.password is None or self.password == '':
-            self.password = getpass.getpass("Password: ")
-
-        if self.clientId == '' or self.clientSecret == '':
-            if not self.nmsLogin:
-                self.central_nms_login()
-            self.get_client_creds()
-
-    ###############################################################
-    #   [API] Pass 1 - Login
-    ###############################################################
-        print("[API] Pass 1 - Login")
-        url = self.getApigwUrl(f"/oauth2/authorize/central/api/login?client_id={self.clientId}")
-        resp1 = self.post_request_api(
-            url=url,
-            headers={
-                'Content-Type': 'application/json',
-            },
-            json={
-                "username": self.username,
-                "password": self.password,
-            },
-        )
-
-        if resp1.status_code != 200:
-            log.err(f"Got error {resp1.status_code}. abort.")
-            return False
-
-        log.debug(f"Get Response: {resp1.content}")
-
-    ###############################################################
-    #   [API] Pass 2 - Generate Authorization Code
-    ###############################################################
-        print("[API] Pass 2 - Get Authorization code")
-        url = self.getApigwUrl(f"/oauth2/authorize/central/api?client_id={self.clientId}&response_type=code&scope=all")
-        resp2 = self.post_request_api(
-            url=url,
-            headers={
-                'Content-Type': 'application/json',
-                #'X-CSRF-Token': 'xxxx',
-            },
-            json={
-                'customer_id': self.customerId
-            }
-        )
-
-        if resp2.status_code != 200:
-            log.err(f"Got error {resp2.status_code}. abort.")
-            return False
-
-        log.debug(f"Get Response: {resp2.content}")
-        auth_code = json.loads(resp2.content)["auth_code"]
-        log.debug(f"API auth successful. Auth code={auth_code}")
-
-    ###############################################################
-    #   [API] Pass 3 - Get Token
-    ###############################################################
-        print("[API] Pass 3 - Get Access token")
-        url = self.getApigwUrl(f"/oauth2/token?client_id={self.clientId}&client_secret={self.clientSecret}&grant_type=authorization_code&code={auth_code}")
-        resp3 = self.post_request_api(
-            url=url,
-            headers={
-                'Content-Type': 'application/json',
-                #'X-CSRF-Token': 'xxxx',
-            },
-        )
-
-        if resp3.status_code != 200:
-            log.err(f"Got error {resp3.status_code}. abort.")
-            return False
-
-        log.debug(f"Get Response: {resp3.content}")
-        j = json.loads(resp3.content)
-        self.accToken = j['access_token']
-        self.refToken = j['refresh_token']
-        self.apises_update()
-        log.debug(f"Got Tokens. acc={self.accToken}, ref={self.refToken}")
-
-        return True
-
-
-    ################################################################
-    #   Generate New Access Token via Central UI
-    ################################################################
-    def generate_acc_token(self):
-        log.debug("generate_acc_token: Generating new token...")
-        url = self.getPortalUrl("/user_apigw/apps/nms/oauth/credentials")
-        csrftoken = self.uiSes.cookies.get("csrftoken", domain=self.getPortalHost())
-        resp = self.post_request(
-            url=url,
-            json={
-                "client_display_name": self.appName,
-                "self.appName": "nms",
-                "redirect_uri": "",
-            },
-            headers={
-                "referer": self.getPortalUrl("/platform/frontend/"),  # Mandatory
-                "x-requested-with": "XMLHttpRequest",   # Mandatory
-                "x-csrf-token": csrftoken   # Mandatory
-            }
-        )
-
-        if resp.status_code != 200:
-            log.err(f"Got error {resp.status_code}.")
-            return False
-
-        log.debug(f"Get Response: {resp.content}")
-        j = json.loads(resp.content)
-        self.accToken = j['access_token']
-        self.refToken = j['refresh_token']
-        self.apises_update()
-        log.info(f"generate_acc_token: Tokens generated for app '{self.appName}', AccToken='{self.accToken}', RefToken='{self.refToken}'")
-        self.save_tokens()
-        return True
-
-
-    ################################################################
-    #   Refresh access token
-    ################################################################
-    def refresh_token(self):
-        assert(self.appName != "")
-        if self.clientId == '' or self.clientSecret == '':
-            if not self.get_client_creds():      # get self.clientId and self.clientSecret
-                log.err("refresh_token: error retrieving client info. abort.")
-                sys.exit(-1)
-
-        url = self.getApigwUrl(f"/oauth2/token?client_id={self.clientId}&client_secret={self.clientSecret}&grant_type=refresh_token&refresh_token={self.refToken}")
-        resp = self.post_request(url)
-        if resp.status_code != 200:
-            log.debug(f"refresh_token: Refresh failed. body='{resp.content}'")
-            return False
-
-        log.debug(f"refresh_token: Refresh successful! body='{resp.content}'")
-        j = json.loads(resp.content)
-        self.accToken = j['access_token']
-        self.refToken = j['refresh_token']
-        self.apises_update()
-        log.info(f"refresh_token: Token refreshed. AccToken={self.accToken}, RefToken={self.refToken}")
-        self.save_tokens()
-        return True
-
-    ################################################################
-    #   Check if Acccess Token is valid
-    #   If it's not, try to refresh it
-    #   If it fails, try to generate new one
-    ################################################################
-    def check_and_refresh(self):
-        url = self.getApigwUrl("/configuration/v2/groups?limit=10&offset=0")
-        resp = self.get_request_api(url)
-        if resp.status_code == 200:
-            log.debug("check_and_refresh: Access Token is valid.")
-            return True
-
-        log.debug(f"check_and_refresh: got response {resp.status_code}")
-
-        if resp.status_code != 401:
-            return False            # unknown error response
-
-        j = json.loads(resp.content)
-        if j['error'] == 'invalid_token':
-            log.debug("check_and_refresh: Got invalid_token error. refreshing tokens...")
-            if self.refresh_token():
-                log.debug("check_and_refresh: token refresh successful. retrying API access ...")
-                resp2 = self.get_request_api(url)
-                if resp2.status_code == 200:
-                    log.debug("check_and_refresh: API Token is valid.")
-                    return True
-                else:
-                    log.debug(f"check_and_refresh: API access failed. response='{resp2.content}'")
-                    return False
-            else:   # token refresh failed
-                return self.generate_acc_token()
-
-        return False
-
-    #
-    #   get valid Access Token
-    #   called from other modules
-    #
-    def get_api_token(self):
-        if not self.restore_tokens():
-            print("Cached token not found. retrieveing new token...")
-            if self.appName is None or self.appName == '':
-                if not self.get_client_creds():  # select appName from application list in Central UI
-                    self.appName = input("Enter App name: ")
-            if not self.generate_acc_token():
-                return False
-
-        return self.check_and_refresh()
-
 #
 #   end of CentralSession class
 #
-
-
 
 def import_config(names):
     cfg = importlib.import_module("central_config")
@@ -896,21 +986,30 @@ if __name__ == '__main__':
     else:
         log.setloglevel(log.LOG_WARN)
 
-    ses = create_session()
+    central = create_session()
 
-    if ses.central_nms_login():
-        print("Central NMS UI login successful.")
-    else:
-        print("Login failed.")
-        sys.exit(-1)
-
-    #if ses.central_api_login():
+    # if central.central_api_login():
     #    print("Central API login successful.")
 
-    if ses.get_api_token():
-        print("Get API token successful.")
-    else:
-        log.err("Failed to get API token.")
-        sys.exit(-1)
+    #   Test API
+    print("\ntesting API...")
+    resp = central.apiGet(
+        endpoint="/configuration/v2/groups",
+        params={
+            "limit": 20,
+            "offset": 0
+        })
+    print(resp)
+
+    #   Test API (pycentral I/F)
+    print("\ntesting API...")
+    resp = central.command(
+        apiMethod="GET",
+        apiPath="/configuration/v2/groups",
+        apiParams={
+            "limit": 20,
+            "offset": 0
+        })
+    print(resp)
 
     sys.exit(0)

@@ -25,7 +25,6 @@ def root_cause(e):
         rc = rc.__context__
     return rc
 
-
 def get_mkeys(dic, *args):
     arg = [*args]
     return(dic[k] for k in arg)
@@ -49,11 +48,9 @@ def get_endpoints(ses, url_fmt, datakey, api=False):
 
     while True:
         if api:
-            url = ses.getApigwUrl(url_fmt.format(limit=limit, offset=offset))
-            resp = ses.get_request_api(url)
+            resp = ses.apiGet(url_fmt.format(limit=limit, offset=offset))
         else:
-            url = ses.getUiUrl(url_fmt.format(limit=limit, offset=offset))
-            resp = ses.get_request(url)
+            resp = ses.nmsGet(url_fmt.format(limit=limit, offset=offset))
         j = json.loads(resp.content)
 
         try:
@@ -312,26 +309,11 @@ if __name__ == '__main__':
     else:
         log.setloglevel(log.LOG_WARN)
 
-    ses = centralsession.create_session()
-
-####### Login
-    if ses.central_nms_login():
-        print("Central NMS UI login successful.")
-    else:
-        print("Login failed.")
-        sys.exit(-1)
-
-    # if ses.get_api_token():
-    #     print("Get API token successful.")
-    # else:
-    #     log.err("Failed to get API token.")
-    #     sys.exit(-1)
-
-    print("")
+    central = centralsession.create_session()
 
 ####### list group
     print("Getting Group list... ", end="")
-    if get_groups(ses):
+    if get_groups(central):
         print("done.")
     else:
         print("failed.")
@@ -342,7 +324,7 @@ if __name__ == '__main__':
 
 ####### list APs
     print("Getting AP list... ", end="")
-    if get_aps(ses):
+    if get_aps(central):
         print("done.")
     else:
         print("failed.")
@@ -353,7 +335,7 @@ if __name__ == '__main__':
 
 ####### list VCs
     print("Getting VC list... ", end="")
-    if get_vcs(ses):
+    if get_vcs(central):
         print("done.")
     else:
         print("failed.")
@@ -364,7 +346,7 @@ if __name__ == '__main__':
 
 ####### list GWs
     print("Getting GW list... ", end="")
-    if get_gws(ses):
+    if get_gws(central):
         print("done.")
     else:
         print("failed.")
@@ -375,7 +357,7 @@ if __name__ == '__main__':
 
 ####### list Switches
     print("Getting Switch list... ", end="")
-    if get_switches(ses):
+    if get_switches(central):
         print("done.")
     else:
         print("failed.")
