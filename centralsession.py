@@ -87,11 +87,11 @@ def root_cause(e):
 ########################
 class CentralSession:
     """
-    Central との http セッションを管理する。
-    UI/API へのログイン、GET/POST インタフェース、Access Token 保存・更新
+    Manages Central session
+    HTTP session for UI/API, API I/F, API tokens
     """
-    def __init__(self, username="", password="", instname="internal", customerid='', appname=''):
-        self.uiSes = requests.Session()         # session for Central NMS App
+    def __init__(self, username, password='', instname='internal', customerid='', appname=''):
+        self.uiSes = requests.Session()         # session for Central UI (Portal/NMS App)
         self.apiSes = requests.Session()        # session for Central API
         self.accToken = ""
         self.refToken = ""
