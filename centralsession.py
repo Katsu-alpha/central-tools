@@ -11,6 +11,7 @@
 
 import sys
 import argparse
+import re
 import json
 import urllib
 import urllib.parse as urlparse
@@ -106,6 +107,9 @@ class CentralSession:
         self.apiLogin = False
         self.tokenCacheFile = 'tokens.txt'
 
+        if instname not in portalDomainList:
+            log.err(f"Invalid Central instance: {instname}")
+            sys.exit(-1)
         if self.central_nms_login():
             log.info("Central NMS UI login successful.")
         else:
@@ -245,7 +249,9 @@ class CentralSession:
         return False    # retry over
 
     ###############################################################
+    #
     #   HPE SSO
+    #
     ###############################################################
     def hpe_sso(self):
 
@@ -339,7 +345,7 @@ class CentralSession:
             saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
             relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
             url = soup.find('form').get('action')
-            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
+            log.debug(f"\tGot SAML response... {saml_code[0:20]}...(snip)...{saml_code[-20:-1]}")
         except:
             log.err("SAML Response is invalid.")
             return False
@@ -360,7 +366,7 @@ class CentralSession:
             saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
             relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
             url = soup.find('form').get('action')
-            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
+            log.debug(f"\tGot SAML response... {saml_code[0:20]}...(snip)...{saml_code[-20:-1]}")
         except:
             log.err("SAML Response is invalid.")
             return False
@@ -381,7 +387,7 @@ class CentralSession:
             saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
             relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
             url = soup.find('form', {'method': 'post'}).get('action')
-            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
+            log.debug(f"\tGot SAML response... {saml_code[0:20]}...(snip)...{saml_code[-20:-1]}")
         except:
             log.err("SAML Response is invalid.")
             return False
@@ -408,13 +414,18 @@ class CentralSession:
         return ref_code
 
 
+    ###############################################################
+    #
+    #   Aruba SSO
+    #
+    ###############################################################
     def aruba_sso(self):
 
         if self.username == '':
-            log.err("aruba_sso: Please specify username.")
+            log.err("aruba_sso: username is empty.")
             return False
         if self.password == '':
-            log.err("aruba_sso: Please specify password.")
+            log.err("aruba_sso: password is empty.")
             return False
 
     ###############################################################
@@ -451,7 +462,7 @@ class CentralSession:
             saml_code = soup.find('input', {'name': 'SAMLResponse'}).get('value')
             relaystate = soup.find('input', {'name': 'RelayState'}).get('value')
             url = soup.find('form').get('action')
-            log.debug(f"\tGot SAML response... {saml_code[0:40]}...(snip)...{saml_code[-40:-1]}")
+            log.debug(f"\tGot SAML response... {saml_code[0:20]}...(snip)...{saml_code[-20:-1]}")
         except:
             log.err("SAML Response is invalid.")
             return False
@@ -511,6 +522,23 @@ class CentralSession:
                 "TargetResource": url,
             },
         )
+        r = re.search("<title>([^<]+)</title>", resp1.text)
+        if not r:
+            log.err("Got unknown response.")
+            log.debug(f"response='{resp1.text}'")
+            return False
+
+        t = r.group(1)
+        if t == 'Logging out':
+            log.err("Login failed.")
+            return False
+        elif t == "Select Account":
+            pass
+        elif t == "Aruba Central":
+            log.debug("Single customer account")
+        else:
+            log.err(f"Got unknown title '{t}'")
+            return False
 
     ###############################################################
     #   Customer selection
@@ -533,13 +561,20 @@ class CentralSession:
                 "cid": self.customerId
             }
         )
+        try:
+            r = json.loads(resp2.text)["redirect_url"]
+        except json.decoder.JSONDecodeError:
+            log.err(f"Customer ID '{self.customerId}' is invalid.")
+            return False
+
+        log.debug(f"Got reirect_url: {r}")
 
     ###############################################################
     #   [Central] Pass 3
     ###############################################################
         print("[Central] Pass 3 - Launch NMS")
         url = self.getPortalUrl("/platform/login/apps/nms/launch")
-        resp3 = self. _get_request(url)
+        resp3 = self._get_request(url)
 
         self.nmsLogin = True
         return True
