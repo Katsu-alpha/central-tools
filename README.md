@@ -18,8 +18,9 @@ It has following advantages to [pycentral](https://github.com/aruba/pycentral) S
 3. This library provides I/F to access Central NMS Application, as well as Central API.
    NMS app provides more comprehensive view of customer's network.
 4. This library provides an interface compatible with pycentral. You can use this class interchangeably with pycentral.
+5. pycentral creates token cache file per customer ID/client ID. This library stores tokens to single file.
 
-If directly called it will get API token and store it to a cache file.
+If directly called it will test an API and return the result.
 
 #### Syntax
 ```
