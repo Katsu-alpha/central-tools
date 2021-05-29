@@ -309,7 +309,7 @@ if __name__ == '__main__':
     else:
         log.setloglevel(log.LOG_WARN)
 
-    central = centralsession.create_session()
+    central = centralsession.create_session_from_config()
 
 ####### list group
     print("Getting Group list... ", end="")

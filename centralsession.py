@@ -1,12 +1,9 @@
 #!/usr/bin/python3
 #
 #    ToDo:
-#       encrypt disable config を取得する方法
-#       session の永続化
-#       inventory のクラス化
-#       コメント英語化
-#       ログファイルの書き出し
-#       エラーチェック、assert
+#       improve error handling
+#       session persistence
+#       logging enhance - timestamp, output to file
 #
 
 import sys
@@ -91,14 +88,14 @@ class CentralSession:
     Manages Central session
     HTTP session for UI/API, API I/F, API tokens
     """
-    def __init__(self, username, password='', instname='internal', customerid='', appname=''):
+    def __init__(self, instname, username, password='', customerid='', appname=''):
         self.uiSes = requests.Session()         # session for Central UI (Portal/NMS App)
         self.apiSes = requests.Session()        # session for Central API
         self.accToken = ""
         self.refToken = ""
         self.username = username
         self.password = password
-        self.instname = instname
+        self.instname = instname.lower()
         self.customerId = customerid
         self.appName = appname
         self.clientId = ""
@@ -210,11 +207,9 @@ class CentralSession:
                 return False
         retry = 0
         result = ''
-        method = apiMethod
         while retry <= 1:
             if not retry_api_call:
                 retry = 100
-            url = self.getApigwUrl(apiPath)
             if not headers and not files:
                 headers = {
                     "Content-Type": "application/json",
@@ -223,10 +218,8 @@ class CentralSession:
             if apiData and headers['Content-Type'] == "application/json":
                 apiData = json.dumps(apiData)
 
-            log.debug(f"\t{method} {url}")
-            resp = self.apiSes.request(url=url, data=apiData, method=method,
+            resp = self.apiReq(apiMethod, apiPath, data=apiData,
                                    headers=headers, params=apiParams, files=files)
-            log.debug(f"\tStatus: {resp.status_code} {resp.reason} ({len(resp.content)} bytes)")
 
             if resp.status_code == 401 and "invalid_token" in resp.text and retry_api_call:
                 log.warn("Received error 401 on requesting url "
@@ -820,10 +813,11 @@ class CentralSession:
     ########################
     def _restore_tokens(self):
         """
-        token.txt から username, customerId, appName がマッチする行を検索し、accToken, refToken を読み込む。
-        ただし appName が指定されていない場合、username, customerId がマッチする最新のエントリから appName を取得する。
-        マッチした行があれば True を、見つからなければ False を返す。
-        apiSes の Authorization ヘッダを accToken でアップデートする
+        Search an entry from token cache file with matching username, customerId and appName
+        If appName is not specified, search an entry with matching username and customerId
+        The search starts from the last line (=latest updated entry) toward the first line
+        Returns True if matching entry is found. False if none matched.
+        Updates Authorization header in apiSes
         :return:
             True    match and updated accToken/refToken
             False   no match
@@ -862,9 +856,9 @@ class CentralSession:
 
     def _save_tokens(self):
         """
-        tokens.txt を username, customerId, appName で検索し、現在の accToken, refToken に書き換える。
-        ファイルがない場合は新規作成。
-        :return:
+        Search an entry in token cache file by username, customerId, appName and
+        update the matching entry in with current accToken/refToken information
+        Create a file if the cache file does not exist
         """
         try:
             with open(self.tokenCacheFile, mode="r") as f:
@@ -990,7 +984,7 @@ class CentralSession:
 #   end of CentralSession class
 #
 
-def import_config(names):
+def _import_config(names):
     cfg = importlib.import_module("central_config")
     for n in names:
         try:
@@ -999,9 +993,9 @@ def import_config(names):
         except AttributeError:
             globals().update({n: ""})
 
-def create_session():
-    import_config(['username', 'password', 'instance', 'customer_id', 'app_name'])
-    return CentralSession(username, password, instance, customer_id, app_name)
+def create_session_from_config():
+    _import_config(['username', 'password', 'instance', 'customer_id', 'app_name'])
+    return CentralSession(instance, username, password, customer_id, app_name)
 
 ################################################################
 #   main
@@ -1021,23 +1015,20 @@ if __name__ == '__main__':
     else:
         log.setloglevel(log.LOG_WARN)
 
-    central = create_session()
-
-    # if central.central_api_login():
-    #    print("Central API login successful.")
+    central = create_session_from_config()
 
     #   Test API
-    print("\ntesting API...")
+    print("\nTesting API...")
     resp = central.apiGet(
         endpoint="/configuration/v2/groups",
         params={
             "limit": 20,
             "offset": 0
         })
-    print(resp)
+    print(resp.text)
 
     #   Test API (pycentral I/F)
-    print("\ntesting API...")
+    print("\nTesting API...")
     resp = central.command(
         apiMethod="GET",
         apiPath="/configuration/v2/groups",
