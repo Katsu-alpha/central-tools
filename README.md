@@ -28,7 +28,7 @@ If directly called it will test an API and return the result.
 ```
 
 ### How to use CentralSession class
-You can create Central session either of below:
+You can create Central session by either of below:
 
 1. Create a configuration file named 'central_config.py' and call create_session_from_config()
 2. Call the constructor of CentralSession class
@@ -43,7 +43,7 @@ password = 'aruba12345'     # optional
 customer_id = 'a93e95c9a2434f9ea0c5c0359db91f73'    # optional
 app_name = 'api-test-script'    # optional
 ```
-How to use:
+How to use it from your script:
 ```
     import centralsession
 
