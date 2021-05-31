@@ -115,6 +115,5 @@ Replace above lines with below:
 ```
     from centralsession import create_session_from_config 
     central = create_session_from_config()
-
 ```
 and put your Central username and instance name to `central_config.py`
