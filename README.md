@@ -3,7 +3,7 @@
 Small tools to handle Central sessions/data structures.
 Edit `central_config.py` and specify the cluster name and username to access.
 
-<br><br>
+<br>
 ## centralsession.py
 
 This is the main class required by most of the scripts in this repository.
@@ -102,3 +102,19 @@ Send POST request to Central NMS app.
                 headers={}, files={}, retry_api_call=True):
 ```
 This interface provides the same syntax as pycentral.
+
+#### Run pycentral samples
+Just replace the constructor calls in pycentral sample scripts as below.
+
+```
+    from pycentral.base import ArubaCentralBase
+    central = ArubaCentralBase(central_info=central_info,
+                           ssl_verify=ssl_verify)
+```
+Replace above lines with below:
+```
+    from centralsession import create_session_from_config 
+    central = create_session_from_config()
+
+```
+and put your Central username and instance name to `central_config.py`
