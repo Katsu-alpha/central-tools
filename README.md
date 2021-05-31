@@ -12,8 +12,8 @@ It manages Central UI/API sessions and API tokens.
 It has following advantages to [pycentral](https://github.com/aruba/pycentral) SDK.
 
 1. You do not need to specify Access Token/Client ID/Client Secret etc to access Central API.
-   The class will take care of it automatically.
-2. pycentral does not support generating token if company SSO is used because oauth API does not support SSO.
+   The main class CentralSession will take care of it automatically.
+2. pycentral does not support generating token if company SSO is used because Central's oauth API does not support SSO.
    This library can generate tokens even with company domain account. 
 3. This library provides I/F to access Central NMS Application, as well as Central API.
    NMS app provides more comprehensive view of customer's network.
