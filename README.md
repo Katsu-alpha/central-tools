@@ -3,7 +3,7 @@
 Small tools to handle Central sessions/data structures.
 Edit `central_config.py` and specify the cluster name and username to access.
 
-<br>
+
 ## centralsession.py
 
 This is the main class required by most of the scripts in this repository.
